@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <title>Digitalización aplicada a los sectores productivos</title>
-<script>
+<script type="text/javascript" src="https://gc.kis.v2.scr.kaspersky-labs.com/FD126C42-EBFA-4E12-B309-BB3FDD723AC1/main.js?attr=TwgF3QhpkEydHyjrc7Djcv62nhpskFw_8JFHdbvjAMjKyPd-PTN9RO7e5pPecDo7lUYpFfDdTC9k3mKVX1t7GHfo4nNKdOvdHEm-h1OLENPED5aRyqeV9bBamPsWSJvP6WZ1uDP9-ciJgmjUlGp_nZ-4m6bNMAU6a21styBHyCz9LMKuJflTU2aatey-8ErktkT0pTuseyglwj6Y9K7hie8Jv6o6IkXj4SOtqEPRUl_Ljw99oemt99ugbewJuJgMNSIr_-EsVDKyLIKDD0Fraf0dixL5ulvcdz5t3GL9VxRBmHFPfOrS6TnT_8xN-NBrTP-KxDJ-rXVApSVm3DQOXxk5hS7QAV33hMFCxCjb8fa4YQTKFNgAkJO0so8Evk_WhAYnr8uJsu-7IfsHNKAwxa-StW3Z0PgaiBUAaXmK74BgZKOkra87CGpYY1jAywGLkm8p-Zvd71jJ1OmWSepaE2-KPhVw9XciykYoAA_QPkEI2siHvAOdbtm26biPmto3I8-2SC17TEkxKqKZHgzqM7iRIBDFV2CGImR5We-9UFXMUZdkC8n87mMTnZELB0KS9CJNeGW0B00fvEuEcRWaAUgXAzgb0cx0s6iTu7cGHEObyhIvZ8PR4IHVtLNRxF3ZT6kZofamBOD9jyYua9h5DRETyJCDOcMGhBSHP6WWXEfRqlUFdvc0ZkZoZpG1F_dpP5xpDj0tG-ljlpJVb_00eA" charset="UTF-8"></script><script>
   // Bloqueo temprano de escritorio: se ejecuta antes de pintar la página
   // para evitar cualquier parpadeo mostrando la app en un ordenador.
   (function(){
@@ -9038,6 +9038,43 @@ async function refreshLocks(){
   state.locks = await loadContentLocks();
 }
 
+/* ---------- progreso guardado: retomar donde lo dejó, logros y cuestionarios ---------- */
+async function loadProgress(){
+  state.readSlides = new Set();
+  state.currentSlide = 0;
+  state.earnedBadges = [];
+  state.completedQuizzes = new Set();
+  if(!supabaseReady || !state.username || isAdminUser()) return;
+  try{
+    const [viewsRes, okViewsRes, badgesRes, attemptsRes] = await Promise.all([
+      supabaseClient.from('slide_views').select('slide_index')
+        .eq('username', state.username).eq('course', COURSE_KEY)
+        .order('slide_index', { ascending:false }).limit(1),
+      supabaseClient.from('slide_views').select('slide_index')
+        .eq('username', state.username).eq('course', COURSE_KEY).eq('read_ok', true),
+      supabaseClient.from('badges_earned').select('badge_number')
+        .eq('username', state.username).eq('course', COURSE_KEY),
+      supabaseClient.from('quiz_attempts').select('chapter_id')
+        .eq('username', state.username).eq('course', COURSE_KEY),
+    ]);
+    if(viewsRes.error) throw viewsRes.error;
+    if(okViewsRes.error) throw okViewsRes.error;
+    if(badgesRes.error) throw badgesRes.error;
+    if(attemptsRes.error) throw attemptsRes.error;
+
+    (okViewsRes.data || []).forEach(row => state.readSlides.add(row.slide_index));
+
+    const lastViewed = (viewsRes.data && viewsRes.data.length) ? viewsRes.data[0].slide_index : -1;
+    state.currentSlide = lastViewed >= 0 ? Math.min(lastViewed + 1, TOTAL_SLIDES - 1) : 0;
+
+    state.earnedBadges = Array.from(new Set((badgesRes.data || []).map(r => r.badge_number)));
+
+    (attemptsRes.data || []).forEach(r => state.completedQuizzes.add(r.chapter_id));
+  }catch(err){
+    console.warn('[Supabase] No se pudo cargar el progreso guardado:', err);
+  }
+}
+
 function isChapterLocked(ch){
   if(isAdminUser()) return { locked:false, unlockAt:null };
   if(!LOCKABLE_GROUP_KEYS.includes(ch.key)) return { locked:false, unlockAt:null }; // SEAT siempre abierto
@@ -9244,6 +9281,8 @@ const state = {
   screen: 'login',
   quiz: null,             // active quiz session {questions, idx, correct, incorrect, answered, chapterKey, standalone}
   locks: {},              // group_key -> row from content_locks (cargado desde Supabase)
+  readSlides: new Set(),  // índices de diapositiva ya leídas a tiempo (≥20 s) por esta persona
+  completedQuizzes: new Set(), // chapter_id de los cuestionarios ya completados al menos una vez
 };
 
 /* ---------- screen switching ---------- */
@@ -9294,6 +9333,7 @@ async function doLogin(){
   state.username = $('#userInput').value.trim();
   upsertProfile();
   await refreshLocks();
+  await loadProgress();
   renderHome();
   showScreen('home');
 }
@@ -9305,6 +9345,8 @@ function doLogout(){
   state.earnedBadges = [];
   state.slideEnterTime = null;
   state.quiz = null;
+  state.readSlides = new Set();
+  state.completedQuizzes = new Set();
 
   $('#userInput').value = '';
   $('#passInput').value = '';
@@ -9354,12 +9396,13 @@ function renderHome(){
     const isCurrent = state.currentSlide >= firstFlatIdx && state.currentSlide <= lastFlatIdx;
     const row = document.createElement('div');
     const access = isChapterLocked(ch);
+    const quizDone = state.completedQuizzes.has(ch.id);
     row.className = 'chapter-row' + (isDone ? ' done' : '') + (isCurrent && !isDone ? ' current' : '') + (access.locked ? ' locked' : '');
     row.innerHTML = `
       <div class="num">${access.locked ? '🔒' : (isDone ? '✓' : ci + 1)}</div>
       <div class="meta">
         <div class="t">${ch.name}</div>
-        <div class="s">${access.locked ? (access.unlockAt ? `Se abre el ${access.unlockAt.toLocaleDateString('es-ES')}` : 'Bloqueado por el equipo docente') : `${ch.slides.length - 1} diapositivas · 1 cuestionario`}</div>
+        <div class="s">${access.locked ? (access.unlockAt ? `Se abre el ${access.unlockAt.toLocaleDateString('es-ES')}` : 'Bloqueado por el equipo docente') : `${ch.slides.length - 1} diapositivas · 1 cuestionario${quizDone ? ' · ✓ cuestionario completado' : ''}`}</div>
       </div>
       ${isCurrent && !isDone && !access.locked ? '<div class="tag">EN CURSO</div>' : ''}
     `;
@@ -9398,7 +9441,8 @@ function enterReader(fromIndex){
 function renderSlide(){
   const idx = state.currentSlide;
   const data = FLAT[idx];
-  state.slideEnterTime = Date.now();
+  // si esta página ya se leyó a tiempo antes, no hace falta esperar de nuevo
+  state.slideEnterTime = state.readSlides.has(idx) ? (Date.now() - 20000) : Date.now();
   startReadCountdown();
 
   // top pills
@@ -9542,6 +9586,7 @@ function goNext(){
   const elapsed = state.slideEnterTime === null ? 20000 : (Date.now() - state.slideEnterTime);
   const readOk = elapsed >= 20000;
   if(!readOk) showReadToast();
+  else state.readSlides.add(state.currentSlide);
   const data = FLAT[state.currentSlide];
   trackSlideView(data, elapsed, readOk);
 
@@ -9586,6 +9631,7 @@ function goPrev(){
   const elapsed = state.slideEnterTime === null ? 20000 : (Date.now() - state.slideEnterTime);
   const readOk = elapsed >= 20000;
   if(!readOk) showReadToast();
+  else state.readSlides.add(state.currentSlide);
   trackSlideView(FLAT[state.currentSlide], elapsed, readOk);
   if(state.currentSlide === 0) return;
   state.currentSlide--;
@@ -9635,6 +9681,7 @@ function initScrub(){
     const elapsed = state.slideEnterTime === null ? 20000 : (Date.now() - state.slideEnterTime);
     const readOk = elapsed >= 20000;
     if(!readOk) showReadToast();
+    else state.readSlides.add(state.currentSlide);
     trackSlideView(FLAT[state.currentSlide], elapsed, readOk);
     const targetIdx = parseInt(scrub.value, 10);
     const targetChapter = CHAPTERS[FLAT[targetIdx].chapterIndex];
@@ -9755,6 +9802,7 @@ function answerQuiz(i, wrap){
 function renderQuizResult(){
   const quiz = state.quiz;
   trackQuizAttempt(quiz);
+  state.completedQuizzes.add(quiz.chapter.id);
   const container = quiz.standalone ? $('#practiceViewport') : $('#slideViewport');
   container.innerHTML = '';
   const wrap = document.createElement('div');
