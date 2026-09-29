@@ -259,6 +259,10 @@ button{font-family:var(--font-body);cursor:pointer;}
 }
 .chapter-row.done .num{background:var(--ok); color:var(--white);}
 .chapter-row.current .num{background:var(--coral); color:var(--white);}
+.chapter-row{cursor:pointer; -webkit-tap-highlight-color:transparent; transition:background .15s, border-color .15s, transform .12s;}
+.chapter-row:active{transform:scale(0.98); background:rgba(255,255,255,0.10);}
+.chapter-row:focus-visible{outline:2px solid var(--gold); outline-offset:2px;}
+.chapter-row .go{width:16px; height:16px; flex-shrink:0; stroke:rgba(255,255,255,0.45); fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round;}
 .chapter-row.locked{opacity:0.55;}
 .chapter-row.locked .num{background:rgba(255,255,255,0.06);}
 .chapter-row .meta{flex:1; min-width:0;}
@@ -432,6 +436,10 @@ button{font-family:var(--font-body);cursor:pointer;}
   position:absolute; left:0; right:0; bottom:0; z-index:25;
   background:linear-gradient(180deg, rgba(6,38,50,0) 0%, rgba(6,38,50,0.94) 30%, var(--petrol-deep) 100%);
   padding:16px 16px calc(10px + var(--safe-b));
+  transition:opacity .25s ease, transform .25s ease;
+}
+.reader-controls.controls-hidden{
+  opacity:0; transform:translateY(14px); pointer-events:none;
 }
 .read-countdown{
   display:flex; align-items:center; justify-content:center; gap:6px;
@@ -9392,7 +9400,10 @@ function renderHome(){
     }
     const firstFlatIdx = FLAT.findIndex(f => f.chapterIndex === ci);
     const lastFlatIdx = firstFlatIdx + ch.slides.length - 1;
-    const isDone = ci < currentChapterIndex() || (ci === currentChapterIndex() && state.currentSlide > lastFlatIdx);
+    // Con lectura en cualquier orden, "hecho" = cuestionario completado o todas las páginas leídas a tiempo
+    let allRead = true;
+    for(let i = firstFlatIdx; i <= lastFlatIdx; i++){ if(!state.readSlides.has(i)){ allRead = false; break; } }
+    const isDone = state.completedQuizzes.has(ch.id) || allRead;
     const isCurrent = state.currentSlide >= firstFlatIdx && state.currentSlide <= lastFlatIdx;
     const row = document.createElement('div');
     const access = isChapterLocked(ch);
@@ -9405,7 +9416,17 @@ function renderHome(){
         <div class="s">${access.locked ? (access.unlockAt ? `Se abre el ${access.unlockAt.toLocaleDateString('es-ES')}` : 'Bloqueado por el equipo docente') : `${ch.slides.length - 1} diapositivas · 1 cuestionario${quizDone ? ' · ✓ cuestionario completado' : ''}`}</div>
       </div>
       ${isCurrent && !isDone && !access.locked ? '<div class="tag">EN CURSO</div>' : ''}
+      ${access.locked ? '' : '<svg class="go" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg>'}
     `;
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    const openChapter = () => {
+      const acc = isChapterLocked(ch);
+      if(acc.locked){ showLockOverlay(acc.unlockAt); return; }
+      enterReader(firstFlatIdx);
+    };
+    row.addEventListener('click', openChapter);
+    row.addEventListener('keydown', e => { if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openChapter(); } });
     list.appendChild(row);
   });
 
@@ -9436,6 +9457,53 @@ function enterReader(fromIndex){
   state.currentSlide = fromIndex;
   showScreen('reader');
   renderSlide();
+  showReaderControls();
+}
+
+/* ---------- controles del lector: toque para mostrar/ocultar, autoocultado a 2 s ---------- */
+const CONTROLS_HIDE_MS = 2000;
+let controlsHideTimer = null;
+let controlsHeld = false; // dedo apoyado sobre los controles (p. ej. arrastrando el slider)
+
+function readerControlsEl(){ return document.querySelector('#screen-reader .reader-controls'); }
+function scheduleHideControls(){
+  clearTimeout(controlsHideTimer);
+  if(controlsHeld) return;
+  controlsHideTimer = setTimeout(hideReaderControls, CONTROLS_HIDE_MS);
+}
+function showReaderControls(){
+  const el = readerControlsEl(); if(!el) return;
+  el.classList.remove('controls-hidden');
+  scheduleHideControls();
+}
+function hideReaderControls(){
+  clearTimeout(controlsHideTimer);
+  const el = readerControlsEl(); if(!el) return;
+  el.classList.add('controls-hidden');
+}
+function toggleReaderControls(){
+  const el = readerControlsEl(); if(!el) return;
+  if(el.classList.contains('controls-hidden')) showReaderControls();
+  else hideReaderControls();
+}
+function initReaderControlsToggle(){
+  const screen = $('#screen-reader');
+  const controls = readerControlsEl();
+
+  // Un toque en la zona de lectura alterna los controles (ignora botones, opciones de quiz, etc.)
+  screen.addEventListener('click', e => {
+    if(controls.contains(e.target)) return;
+    if(e.target.closest('button, a, input, label, select, textarea, .q-option, .badge-earned-overlay')) return;
+    toggleReaderControls();
+  });
+
+  // Mientras se usan los controles, no se ocultan; al soltar se reinicia el contador de 2 s
+  controls.addEventListener('pointerdown', () => { controlsHeld = true; clearTimeout(controlsHideTimer); });
+  const release = () => { if(controlsHeld){ controlsHeld = false; scheduleHideControls(); } };
+  window.addEventListener('pointerup', release);
+  window.addEventListener('pointercancel', release);
+  controls.addEventListener('click', scheduleHideControls);
+  $('#scrub').addEventListener('input', () => { clearTimeout(controlsHideTimer); });
 }
 
 function renderSlide(){
@@ -10017,6 +10085,7 @@ function init(){
   initSupabase();
   initLogin();
   initScrub();
+  initReaderControlsToggle();
 
   $('#prevArrow').addEventListener('click', goPrev);
   $('#nextArrow').addEventListener('click', goNext);
